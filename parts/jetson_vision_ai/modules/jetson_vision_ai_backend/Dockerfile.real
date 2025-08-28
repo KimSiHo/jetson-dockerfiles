@@ -1,0 +1,81 @@
+# ----------------------------
+# 1) Build Stage
+# ----------------------------
+FROM ghcr.io/kimsiho/jetson_vision_ai_common/stg:latest AS common
+FROM nvcr.io/nvidia/deepstream-l4t:7.1-samples-multiarch AS build
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git pkg-config \
+    libzmq3-dev \
+    nlohmann-json3-dev \
+    libspdlog-dev \
+    libfmt-dev \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    libtbb-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=common /opt/vision-common /opt/vision-common
+ENV LD_LIBRARY_PATH=/opt/vision-common/lib:$LD_LIBRARY_PATH
+
+WORKDIR /workspace/vision-backend
+
+ARG GIT_REF
+RUN git clone https://github.com/KimSiHo/vision-backend.git . \
+    && git fetch --all --tags --prune \
+    && git checkout $GIT_REF \
+    && cmake -S . -B build -DCMAKE_PREFIX_PATH=/opt/vision-common -DCMAKE_INSTALL_PREFIX=/opt/vision-backend \
+    && cmake --build build -j \
+    && cmake --install build
+
+# ----------------------------
+# 2) Runtime Stage
+# ----------------------------
+FROM nvcr.io/nvidia/deepstream-l4t:7.1-samples-multiarch
+
+USER root
+
+RUN useradd -m -s /bin/bash great \
+    && mkdir -p /home/great/scripts /opt/vision-backend/models/Primary_Detector /etc/vision-backend \
+    && chown -R great:great /home/great /opt/vision-backend
+
+COPY --chown=great:great --from=common /opt/vision-common /opt/vision-common
+COPY --chown=great:great --from=build /opt/vision-backend /opt/vision-backend
+
+ARG PHASE
+ENV PHASE=$PHASE
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libzmq5 \
+    libspdlog1 \
+    libfmt8 \
+    libgstreamer1.0-0 \
+    libgstreamer-plugins-base1.0-0 \
+    libtbb12 \
+    && rm -rf /var/lib/apt/lists/*
+
+##############################
+# 설정 파일 및 스크립트 파일 복사
+##############################
+USER root
+
+ADD --chown=great:great ./filters/${PHASE}/manage_application.sh /home/great/scripts/manage_application.sh
+ADD --chown=great:great ./filters/${PHASE}/entrypoint.sh /home/great/scripts/entrypoint.sh
+ADD --chown=great:great ./filters/${PHASE}/resnet18_trafficcamnet_pruned.onnx /opt/vision-backend/models/Primary_Detector/resnet18_trafficcamnet_pruned.onnx
+ADD --chown=great:great ./filters/${PHASE}/resnet18_trafficcamnet_pruned.onnx_b1_gpu0_fp16.engine /opt/vision-backend/models/Primary_Detector/resnet18_trafficcamnet_pruned.onnx_b1_gpu0_fp16.engine
+ADD --chown=great:great ./filters/${PHASE}/config_infer_primary.txt /opt/vision-backend/models/Primary_Detector/labels.txt
+ADD --chown=great:great ./filters/${PHASE}/config_infer_primary.txt /opt/vision-backend/models/Primary_Detector/cal_trt.bin
+ADD ./filters/${PHASE}/config_infer_primary.txt /etc/vision-backend/config_infer_primary.txt
+
+RUN chmod 755 /home/great/scripts/manage_application.sh \
+    && chmod 755 /home/great/scripts/entrypoint.sh \
+    && chmod 644 /etc/vision-backend/config_infer_primary.txt
+
+##############################
+# entrypoint
+##############################
+USER root
+
+ENTRYPOINT ["/home/great/scripts/entrypoint.sh"]
