@@ -1,0 +1,116 @@
+# ----------------------------
+# 1) Build Stage
+# ----------------------------
+FROM nvcr.io/nvidia/deepstream-l4t:7.1-samples-multiarch AS build
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git pkg-config \
+    libzmq3-dev \
+    libspdlog-dev \
+    nlohmann-json3-dev \
+    libfmt-dev \
+    qtbase5-dev qtdeclarative5-dev qtquickcontrols2-5-dev qtlocation5-dev qtpositioning5-dev qtconnectivity5-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/vision-frontend
+
+ARG GIT_REF
+RUN git clone https://github.com/KimSiHo/vision-frontend.git . \
+    && git fetch --all --tags --prune \
+    && git checkout $GIT_REF \
+    && cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/opt/vision-frontend \
+    && cmake --build build -j \
+    && cmake --install build
+
+# ----------------------------
+# 2) Runtime Stage
+# ----------------------------
+FROM nvcr.io/nvidia/deepstream-l4t:7.1-samples-multiarch
+
+USER root
+
+RUN groupadd -g 1001 great \
+    && useradd -m -u 1001 -g 1001 -s /bin/bash great \
+    && mkdir -p /home/great/scripts /var/log/vision \
+    && chown -R great:great /home/great /var/log/vision
+
+COPY --chown=great:great --from=build /opt/vision-frontend /opt/vision-frontend
+
+ARG PHASE
+ENV PHASE=$PHASE
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libzmq5 \
+    libspdlog1 \
+    libfmt8 \
+    qtwayland5 libqt5core5a libqt5gui5 libqt5widgets5 \
+    qml-module-qtquick-controls2 qml-module-qtquick2 qml-module-qtquick-window2 qml-module-qtlocation qml-module-qtpositioning qml-module-qtbluetooth \
+      qml-module-qtquick-layouts \
+    libqt5positioning5 libqt5location5 libqt5bluetooth5 \
+    libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 gstreamer1.0-plugins-good gstreamer1.0-qt5 gstreamer1.0-gl \
+    fonts-nanum fonts-noto-color-emoji \
+    libsqlite3-0 \
+    && fc-cache -fv \
+    && rm -rf /var/lib/apt/lists/*
+
+##############################
+# 설정 파일 및 스크립트 파일 복사
+##############################
+USER root
+
+ADD --chown=great:great ./filters/${PHASE}/manage_application.sh /home/great/scripts/manage_application.sh
+ADD --chown=great:great ./filters/${PHASE}/entrypoint.sh /home/great/scripts/entrypoint.sh
+
+RUN chmod 755 /home/great/scripts/manage_application.sh \
+    && chmod 755 /home/great/scripts/entrypoint.sh
+
+##############################
+# 프로젝트 원격 개발 설정
+##############################
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git pkg-config \
+    libzmq3-dev \
+    libspdlog-dev \
+    nlohmann-json3-dev \
+    libfmt-dev \
+    qtbase5-dev qtdeclarative5-dev qtquickcontrols2-5-dev qtlocation5-dev qtpositioning5-dev qtconnectivity5-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    libsqlite3-dev \
+    openssh-server \
+    vim \
+    clang-tidy clang-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# FIXME 일단 root 으로 ssh 연결 진행. 일반 유저로 ssh 연결로 FIX
+RUN echo "great:great" | chpasswd \
+    && echo "root:great" | chpasswd \
+    && mkdir -p /run/sshd \
+    && ssh-keygen -A \
+    && addgroup --system ssh_keys \
+    && chgrp ssh_keys /etc/ssh/ssh_host_*_key \
+    && chmod 600 /etc/ssh/ssh_host_*_key \
+    && usermod -aG ssh_keys great
+
+# 개인 별 설정. 불필요시 비활성화
+ADD --chown=great:great ./filters/${PHASE}/gitconfig /home/great/.gitconfig
+ADD --chown=great:great ./filters/${PHASE}/bash_aliases /home/great/.bash_aliases
+ADD --chown=great:great ./filters/${PHASE}/project_develop /home/great/.project_develop
+
+# root 사용자도 공통으로 적용하려면 /etc/bash.bashrc 로 옮기기.
+RUN echo ". ~/.project_develop" >> /home/great/.bashrc
+
+RUN sed -i '/^#*ClientAliveInterval/d' /etc/ssh/sshd_config \
+    && echo "ClientAliveInterval 60" >> /etc/ssh/sshd_config
+
+##############################
+# entrypoint
+##############################
+USER root
+
+ENTRYPOINT ["/home/great/scripts/entrypoint.sh"]

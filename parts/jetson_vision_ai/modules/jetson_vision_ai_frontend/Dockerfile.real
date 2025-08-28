@@ -1,0 +1,76 @@
+# ----------------------------
+# 1) Build Stage
+# ----------------------------
+FROM nvcr.io/nvidia/deepstream-l4t:7.1-samples-multiarch AS build
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git pkg-config \
+    libzmq3-dev \
+    libspdlog-dev \
+    nlohmann-json3-dev \
+    libfmt-dev \
+    qtbase5-dev qtdeclarative5-dev qtquickcontrols2-5-dev qtlocation5-dev qtpositioning5-dev qtconnectivity5-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/vision-frontend
+
+ARG GIT_REF
+RUN git clone https://github.com/KimSiHo/vision-frontend.git . \
+    && git fetch --all --tags --prune \
+    && git checkout $GIT_REF \
+    && cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/opt/vision-frontend \
+    && cmake --build build -j \
+    && cmake --install build
+
+# ----------------------------
+# 2) Runtime Stage
+# ----------------------------
+FROM nvcr.io/nvidia/deepstream-l4t:7.1-samples-multiarch
+
+USER root
+
+RUN groupadd -g 1001 great \
+    && useradd -m -u 1001 -g 1001 -s /bin/bash great \
+    && mkdir -p /home/great/scripts /var/log/vision \
+    && chown -R great:great /home/great /var/log/vision
+
+COPY --chown=great:great --from=build /opt/vision-frontend /opt/vision-frontend
+
+ARG PHASE
+ENV PHASE=$PHASE
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libzmq5 \
+    libspdlog1 \
+    libfmt8 \
+    qtwayland5 libqt5core5a libqt5gui5 libqt5widgets5 \
+    qml-module-qtquick-controls2 qml-module-qtquick2 qml-module-qtquick-window2 qml-module-qtlocation qml-module-qtpositioning qml-module-qtbluetooth \
+      qml-module-qtquick-layouts \
+    libqt5positioning5 libqt5location5 libqt5bluetooth5 \
+    libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 gstreamer1.0-plugins-good gstreamer1.0-qt5 gstreamer1.0-gl \
+    fonts-nanum fonts-noto-color-emoji \
+    libsqlite3-0 \
+    && fc-cache -fv \
+    && rm -rf /var/lib/apt/lists/*
+
+##############################
+# 설정 파일 및 스크립트 파일 복사
+##############################
+USER root
+
+ADD --chown=great:great ./filters/${PHASE}/manage_application.sh /home/great/scripts/manage_application.sh
+ADD --chown=great:great ./filters/${PHASE}/entrypoint.sh /home/great/scripts/entrypoint.sh
+
+RUN chmod 755 /home/great/scripts/manage_application.sh \
+    && chmod 755 /home/great/scripts/entrypoint.sh
+
+##############################
+# entrypoint
+##############################
+USER root
+
+ENTRYPOINT ["/home/great/scripts/entrypoint.sh"]
